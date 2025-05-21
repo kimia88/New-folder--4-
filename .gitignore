@@ -1,0 +1,4 @@
+.venv
+.venv64
+.venv310
+**/*.pyc

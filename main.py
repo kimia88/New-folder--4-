@@ -1,9 +1,9 @@
 import asyncio
 import logging
 import urllib3
-from services.sql_server_database import SQLServerDatabase
+from services.sql_server_database import SqlServerDatabase
 from services.llm_service import QService
-from services.seo_service import SEOService
+from services.seo_service import SEOServiceAdvanced
 
 # غیرفعال کردن هشدارهای InsecureRequestWarning
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -20,13 +20,21 @@ def setup_database_connection():
     DATABASE = "ContentGenerator"
     USERNAME = "admin"
     PASSWORD = "Nightmare123!@#"
-    db = SQLServerDatabase(SERVER, DATABASE, USERNAME, PASSWORD)
+
+    connection_string = (
+        "DRIVER={ODBC Driver 17 for SQL Server};"
+        f"SERVER={SERVER};"
+        f"DATABASE={DATABASE};"
+        f"UID={USERNAME};"
+        f"PWD={PASSWORD}"
+    )
+    db = SqlServerDatabase(connection_string)
     return db
 
 def setup_services(db):
     SESSION_HASH = "amir"
     q_service = QService(session_hash=SESSION_HASH)
-    seo_service = SEOService(db=db, q_service=q_service)
+    seo_service = SEOServiceAdvanced(db=db, q_service=q_service)
     return seo_service
 
 def test_table_existence(db):
@@ -55,7 +63,7 @@ async def main():
         logger.info("🚀 شروع فرآیند بهینه‌سازی عناوین برای سئو...")
 
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, seo_service.generate_title_for_all)
+        await loop.run_in_executor(None, seo_service.optimize_titles)
 
     except Exception as e:
         logger.exception(f"❌ خطای کلی در اجرای برنامه: {e}")
