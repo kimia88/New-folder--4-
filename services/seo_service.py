@@ -1,31 +1,26 @@
 import json
 import logging
-import os
 import re
 import time
-import statistics
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from difflib import SequenceMatcher
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import spacy  
-from sentence_transformers import SentenceTransformer, util
-from services.seo_title_evaluator import SEOTitleEvaluator  # فرض بر این است که این کلاس موجود است و درست کار می‌کند
+import spacy
+from sentence_transformers import util
+from services.seo_title_evaluator import SEOTitleEvaluator
 
-# بارگذاری مدل NLP برای کلیدواژه
-nlp = spacy.load("en_core_web_sm")  # برای فارسی هم می‌توانید مدل مناسب را جایگزین کنید
+nlp = spacy.load("en_core_web_sm")
 
 class SEOServiceAdvanced:
     def __init__(
         self,
         db,
         q_service,
-        min_score: float = 8.5,
-        retries: int = 8,
-        delay: float = 4.0,
-        max_backoff: float = 60.0,
-        max_workers: int = 5,
+        min_score=8.5,
+        retries=8,
+        delay=4.0,
+        max_backoff=60.0,
     ):
         self.db = db
         self.q_service = q_service
@@ -35,15 +30,14 @@ class SEOServiceAdvanced:
         self.max_backoff = max_backoff
         self.evaluator = SEOTitleEvaluator()
         self.past_scores: List[float] = []
-        self.max_workers = max_workers
 
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s | %(levelname)s | %(message)s",
             handlers=[
                 logging.StreamHandler(),
-                logging.FileHandler("seo_service_advanced.log", encoding="utf-8")
-            ]
+                logging.FileHandler("seo_service_advanced.log", encoding="utf-8"),
+            ],
         )
 
     def extract_focus_keyword(self, title: str) -> str:
@@ -51,15 +45,6 @@ class SEOServiceAdvanced:
         keywords = [token.lemma_ for token in doc if token.is_alpha and not token.is_stop]
         keywords = sorted(keywords, key=lambda w: len(w), reverse=True)[:5]
         return " ".join(keywords) if keywords else title.strip().lower()
-
-    def _dynamic_min_score(self) -> float:
-        if len(self.past_scores) >= 5:
-            mean = statistics.mean(self.past_scores)
-            stdev = statistics.stdev(self.past_scores)
-            dynamic_threshold = min(10.0, max(self.base_min_score, mean + stdev / 2))
-            logging.debug(f"Dynamic min_score adjusted to {dynamic_threshold:.2f}")
-            return dynamic_threshold
-        return self.base_min_score
 
     def _semantic_similarity(self, a: str, b: str) -> float:
         try:
@@ -77,48 +62,36 @@ class SEOServiceAdvanced:
         words = re.findall(r'\w+', title)
         if not words:
             return True
-        gibberish_count = 0
-        for w in words:
-            if len(w) > 20 or not re.search(r'[a-zA-Z0-9\u0600-\u06FF]', w):
-                gibberish_count += 1
-        ratio = gibberish_count / len(words)
-        if ratio > 0.3:
-            logging.debug(f"Gibberish detected ({ratio:.2f}) in title: {title}")
-        return ratio > 0.3
+        gibberish_count = sum(1 for w in words if len(w) > 20 or not re.search(r'[a-zA-Z0-9؀-ۿ]', w))
+        return gibberish_count / len(words) > 0.3
 
     def _parse_response(self, raw: str) -> Dict[str, Any]:
-        json_matches = re.findall(r"\{.*?\}", raw, re.DOTALL)
-        if not json_matches:
-            logging.debug(f"Raw response:\n{raw}")
-            raise ValueError("JSON not found in response.")
         try:
-            return json.loads(json_matches[0])
-        except json.JSONDecodeError as e:
-            logging.debug(f"JSON decode error: {e}\nRaw JSON: {json_matches[0]}")
+            match = re.search(r'\{.*?\"original_title\".*?\"score\"\s*:\s*\d+.*?\}', raw, re.DOTALL)
+            if match:
+                return json.loads(match.group(0))
+            raise ValueError("JSON block not found.")
+        except Exception as e:
+            logging.debug(f"Failed to parse response: {e} | Raw: {raw}")
             raise
 
-    def _build_prompt(self, title: str, lang_id: int, last_score: float, emphasize_change: bool) -> str:
-        if lang_id == 1:  # Persian
+    def _build_prompt(self, title: str, lang_id: int, emphasize_change: bool) -> str:
+        if lang_id == 1:
             prompt = (
-                "عنوان زیر را به صورت بهینه و کاملاً جدید برای سئو بازنویسی کن. عنوان باید معنی‌دار، جذاب، خلاصه، "
-                "و شامل کلیدواژه‌های مهم باشد. از کلمات تکراری و اضافی پرهیز کن.\n"
-                "خروجی فقط یک JSON مانند زیر باشد:\n"
-                "{\n  \"original_title\": \"...\",\n  \"optimized_title\": \"...\",\n  \"score\": عدد بین ۰ تا ۱۰\n}\n\n"
-                f"عنوان:\n{title}"
+                "عنوان زیر را به صورت جدید، سئو شده و فقط با خروجی JSON بازنویسی کن."
+                " زبان را حفظ کن و از ترجمه خودداری کن. فقط این فرمت را تولید کن:\n"
+                '{\n  "original_title": "...",\n  "optimized_title": "...",\n  "score": عدد بین ۰ تا ۱۰\n}\n'
+                f"\nعنوان:\n{title}"
             )
-            if emphasize_change:
-                prompt += "\n❗ لطفاً نسخه‌ای کاملاً جدید، قوی‌تر و متفاوت از نظر سئو تولید کن."
         else:
             prompt = (
-                "Rewrite the following title to be completely new and SEO optimized. It should be meaningful, attractive, concise, "
-                "and keyword-rich. Avoid repetitive or redundant words.\n"
-                "Return ONLY a JSON like this:\n"
-                "{\n  \"original_title\": \"...\",\n  \"optimized_title\": \"...\",\n  \"score\": number between 0 and 10\n}\n\n"
-                f"Title:\n{title}"
+                "Rewrite the following title for SEO, preserving the original language."
+                " Return ONLY a JSON in this format:\n"
+                '{\n  "original_title": "...",\n  "optimized_title": "...",\n  "score": number between 0 and 10\n}\n'
+                f"\nTitle:\n{title}"
             )
-            if emphasize_change:
-                prompt += "\n❗ Please generate a completely new, stronger, and distinct SEO version."
-
+        if emphasize_change:
+            prompt += "\n❗ Output must be a strong, new version of the title."
         return prompt
 
     def _update_title_in_database(self, content_id: int, optimized_title: str, seo_score: float):
@@ -128,24 +101,13 @@ class SEOServiceAdvanced:
         except Exception as e:
             logging.error(f"❌ DB update error for content_id {content_id}: {e}")
 
-    def _save_results(self, results: List[Dict[str, Any]]):
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = f"seo_output/seo_results_{ts}.json"
-        os.makedirs("seo_output", exist_ok=True)
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(results, f, ensure_ascii=False, indent=2)
-            logging.info(f"📁 Results saved: {path}")
-        except Exception as e:
-            logging.error(f"❌ Failed to save results: {e}")
+    def _process_single_content(self, content: Dict[str, Any]):
+        content_id = content.get("content_id") or content.get("ContentID")
+        title = (content.get("title") or content.get("Title") or "").strip().replace("  ", " ")
 
-    def _combine_scores(self, seo_score: float, engagement_score: Optional[float]) -> float:
-        # در اینجا فقط نمره سئو را استفاده می‌کنیم
-        return seo_score
+        logging.info(f"▶️ Start processing content_id {content_id} | Title: {title}")
 
-    def _process_single_content(self, content):
-        content_id, title, lang_id = content
-        if not title or not title.strip():
+        if not title:
             logging.info(f"❌ Skipped empty title for content_id {content_id}")
             return None
 
@@ -155,85 +117,62 @@ class SEOServiceAdvanced:
 
         best_title = title
         best_score = original_score
-        min_score_dynamic = self._dynamic_min_score()
 
-        candidates = [{"title": title, "score": original_score}]
+        lang_id = 1 if any('\u0600' <= c <= '\u06FF' for c in title) else 0
         backoff = self.delay
 
         for attempt in range(1, self.retries + 1):
-            emphasize_change = attempt > 2 or best_score < min_score_dynamic / 2
-            prompt = self._build_prompt(best_title, lang_id, best_score, emphasize_change=emphasize_change)
+            emphasize_change = attempt > 2 or best_score < self.base_min_score / 2
+            prompt = self._build_prompt(best_title, lang_id, emphasize_change)
+
+            logging.info(f"🔄 Attempt {attempt} | Sending prompt for content_id {content_id}")
 
             try:
                 self.q_service.send_request(prompt)
+                time.sleep(1.0)
                 raw_response = self.q_service.get_response()
+                logging.info(f"Received raw response for content_id {content_id}: {raw_response[:200]}")
+
                 if not raw_response or "⚠️" in raw_response:
-                    raise ValueError("Invalid response from model")
+                    raise ValueError("Invalid or empty response from model")
 
                 data = self._parse_response(raw_response)
-                candidate = data.get("optimized_title", "").strip()
+                candidate = data["optimized_title"].strip()
+
                 if not candidate or self._looks_gibberish(candidate):
                     raise ValueError("Gibberish or empty optimized title")
 
-                semantic_sim = self._semantic_similarity(best_title, candidate)
-                seq_sim = self._similarity_ratio(best_title, candidate)
-                similarity = (semantic_sim + seq_sim) / 2
-
                 score = self.evaluator.evaluate_title(candidate, keyword)
-                combined_score = self._combine_scores(score, None)
 
-                candidates.append({"title": candidate, "score": combined_score})
-
-                # فقط نمره رو معیار قرار بده، تا پیشرفت واقعی در عنوان صورت بگیره
-                if combined_score > best_score:
+                if score > best_score and self._semantic_similarity(best_title, candidate) > 0.6:
                     best_title = candidate
-                    best_score = combined_score
+                    best_score = score
                     backoff = self.delay
-                    logging.info(f"✨ Improved title on attempt {attempt} with combined score {combined_score:.2f}")
+                    logging.info(f"✅ Improved title on attempt {attempt} with score {score:.2f}")
                 else:
-                    logging.debug(f"No improvement on attempt {attempt} (score: {combined_score:.2f})")
+                    logging.info(f"ℹ️ No improvement on attempt {attempt} (Best score: {best_score:.2f})")
 
             except Exception as e:
-                logging.warning(f"Attempt {attempt} failed for content_id {content_id}: {e}")
+                logging.warning(f"⚠️ Attempt {attempt} failed for content_id {content_id} | Error: {e}")
 
+            logging.info(f"⏳ Sleeping for {backoff:.1f} seconds before next attempt")
             time.sleep(backoff)
             backoff = min(backoff * 2, self.max_backoff)
 
-        if best_score > original_score and best_title != title and best_score >= min_score_dynamic:
+        if best_score > original_score:
             self._update_title_in_database(content_id, best_title, best_score)
         else:
-            logging.info(f"ℹ️ content_id {content_id} | No meaningful improvement")
+            logging.info(f"ℹ️ content_id {content_id} | No better SEO score found. Keeping original title.")
+
+        logging.info(f"🏁 Finished processing content_id {content_id} | Final title: \"{best_title}\" | Final score: {best_score:.2f}")
 
         return {
             "content_id": content_id,
             "original_title": title,
             "optimized_title": best_title,
             "seo_score": best_score,
-            "candidates": candidates
+            "keyword": keyword,
         }
 
-    def optimize_titles(self, limit: int = 50):
-        contents = self.db.select(
-            f"""
-            SELECT Id, Title, ContentLanguageId 
-            FROM dbo.TblPureContent 
-            WHERE Title IS NOT NULL AND LEN(Title) > 0 
-            ORDER BY NEWID() 
-            OFFSET 0 ROWS FETCH NEXT {limit} ROWS ONLY
-            """
-        )
-
-        results = []
-
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_content = {executor.submit(self._process_single_content, c): c for c in contents}
-            for future in as_completed(future_to_content):
-                try:
-                    res = future.result()
-                    if res:
-                        results.append(res)
-                except Exception as e:
-                    logging.error(f"Error processing content: {e}")
-
-        self._save_results(results)
-        return results
+    def optimize_titles(self, contents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return [res for content in contents if (res := self._process_single_content(content))]

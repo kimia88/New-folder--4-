@@ -1,103 +1,74 @@
 import pyodbc
+import logging
+from typing import List, Dict, Any
 
 class SqlServerDatabase:
-    def __init__(self, connection_string):
-        self.conn_str = connection_string
+    def __init__(self, connection_string: str):
+        self.connection_string = connection_string
         self.conn = None
+        self.cursor = None
 
-    def connect(self):
-        if self.conn is None:
-            self.conn = pyodbc.connect(self.conn_str)
-        return self.conn
+    def connect(self) -> None:
+        try:
+            self.conn = pyodbc.connect(self.connection_string)
+            self.cursor = self.conn.cursor()
+            logging.info("✅ اتصال به دیتابیس برقرار شد.")
+        except Exception as e:
+            logging.error(f"❌ خطا در اتصال به دیتابیس: {e}")
+            raise
 
-    def disconnect(self):
-        if self.conn:
-            self.conn.close()
-            self.conn = None
+    def disconnect(self) -> None:
+        try:
+            if self.cursor:
+                self.cursor.close()
+            if self.conn:
+                self.conn.close()
+            logging.info("🔌 ارتباط با دیتابیس قطع شد.")
+        except Exception as e:
+            logging.error(f"❌ خطا در قطع ارتباط با دیتابیس: {e}")
 
-    def test_table_exists(self, table_name):
-        conn = self.connect()
-        cursor = conn.cursor()
-        query = "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = ?"
-        cursor.execute(query, (table_name,))
-        exists = cursor.fetchone() is not None
-        cursor.close()
-        return exists
+    def test_table_exists(self, table_name: str) -> bool:
+        try:
+            query = """
+            SELECT CASE WHEN EXISTS (
+                SELECT * FROM INFORMATION_SCHEMA.TABLES 
+                WHERE TABLE_NAME = ?
+            ) THEN 1 ELSE 0 END
+            """
+            self.cursor.execute(query, (table_name,))
+            exists = self.cursor.fetchone()[0]
+            return exists == 1
+        except Exception as e:
+            logging.error(f"❌ خطا در بررسی وجود جدول '{table_name}': {e}")
+            return False
 
-    def select(self, query, params=None):
-        conn = self.connect()
-        cursor = conn.cursor()
-        if params:
-            cursor.execute(query, params)
-        else:
-            cursor.execute(query)
-        rows = cursor.fetchall()
-        cursor.close()
-        return rows
+    def get_contents_for_seo(self) -> List[Dict[str, Any]]:
+        try:
+            query = """
+                SELECT Id, Title
+                FROM TblPureContent 
+                WHERE LEN(Title) > 0
+            """
+            self.cursor.execute(query)
+            rows = self.cursor.fetchall()
+            contents = [{"content_id": row[0], "title": row[1]} for row in rows]
+            return contents
+        except Exception as e:
+            logging.error(f"❌ خطا در واکشی محتوا: {e}")
+            return []
 
-    def execute(self, query, params=None):
-        """
-        برای کوئری‌هایی مثل UPDATE, INSERT, DELETE
-        """
-        conn = self.connect()
-        cursor = conn.cursor()
-        if params:
-            cursor.execute(query, params)
-        else:
-            cursor.execute(query)
-        conn.commit()
-        cursor.close()
+    def update_pure_content(self, content_id: int, new_title: str) -> None:
+        try:
+            query = "UPDATE TblPureContent SET Title = ? WHERE Id = ?"
+            self.cursor.execute(query, (new_title, content_id))
+            self.conn.commit()
+            logging.info(f"✅ عنوان ID {content_id} با موفقیت به‌روزرسانی شد.")
+        except Exception as e:
+            logging.error(f"❌ خطا در به‌روزرسانی عنوان ID {content_id}: {e}")
 
-    def update_pure_content(self, content_id, new_title):
-        query = "UPDATE dbo.TblPureContent SET Title = ? WHERE Id = ?"
-        self.execute(query, (new_title, content_id))
+    def __enter__(self):
+        self.connect()
+        return self
 
-
-# نحوه ساخت connection string برای SQL Server
-def create_connection_string(server, database, username, password):
-    return (
-        "DRIVER={ODBC Driver 17 for SQL Server};"
-        f"SERVER={server};"
-        f"DATABASE={database};"
-        f"UID={username};"
-        f"PWD={password}"
-    )
-
-
-# تست اتصال و اجرای یک select ساده
-if __name__ == "__main__":
-    SERVER = "45.149.76.141"
-    DATABASE = "ContentGenerator"
-    USERNAME = "admin"
-    PASSWORD = "Nightmare123!@#"
-
-    conn_str = create_connection_string(SERVER, DATABASE, USERNAME, PASSWORD)
-    db = SqlServerDatabase(conn_str)
-
-    try:
-        # اتصال به دیتابیس
-        db.connect()
-        print("✅ اتصال به دیتابیس برقرار شد.")
-
-        # بررسی وجود جدول
-        if db.test_table_exists('TblPureContent'):
-            print("✅ جدول TblPureContent موجود است.")
-        else:
-            print("❌ جدول TblPureContent پیدا نشد.")
-
-        # اجرای یک کوئری SELECT نمونه
-        rows = db.select("SELECT TOP 5 Id, Title FROM dbo.TblPureContent")
-        for row in rows:
-            # دسترسی با اندیس مطمئن‌تر است
-            print(f"Id: {row[0]}, Title: {row[1]}")
-
-        # نمونه آپدیت کردن یک رکورد (آیدی فرضی 1)
-        db.update_pure_content(1, "عنوان جدید بهینه شده")
-        print("✅ آپدیت عنوان با موفقیت انجام شد.")
-
-    except Exception as e:
-        print(f"❌ خطا در اتصال یا اجرای کوئری: {e}")
-
-    finally:
-        db.disconnect()
-        print("🔌 اتصال به دیتابیس قطع شد.")
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.disconnect()
