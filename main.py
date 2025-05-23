@@ -1,6 +1,10 @@
 import asyncio
 import logging
 import urllib3
+import os
+import json
+from datetime import datetime
+
 from services.sql_server_database import SqlServerDatabase
 from services.llm_service import QService
 from services.seo_service import SEOServiceAdvanced
@@ -75,21 +79,39 @@ async def main():
 
         logger.info("🚀 شروع فرآیند بهینه‌سازی عناوین برای سئو...")
 
-        # گرفتن محتوا از دیتابیس
-        contents = await asyncio.to_thread(db.get_contents_for_seo)
+        try:
+            contents = await asyncio.to_thread(db.get_contents_for_seo)
+        except Exception as e:
+            logger.exception(f"❌ خطا در دریافت محتواها از دیتابیس: {e}")
+            return
+
         if not contents:
             logger.warning("⚠️ داده‌ای برای بهینه‌سازی پیدا نشد.")
             return
 
-        # فراخوانی بهینه‌سازی
-        results = await asyncio.to_thread(seo_service.optimize_titles, contents)
+        try:
+            results = await asyncio.to_thread(seo_service.run)
+        except Exception as e:
+            logger.exception(f"❌ خطا در بهینه‌سازی عناوین: {e}")
+            return
 
         logger.info("✅ فرآیند بهینه‌سازی پایان یافت.")
         logger.info(f"📊 تعداد عناوین بهینه‌شده: {len(results)}")
 
-        # ✅ نمایش نتایج بهینه‌سازی
         for res in results:
             logger.info(f"🎯 Content ID: {res['content_id']} | Optimized Title: {res['optimized_title']}")
+
+        # ✅ ذخیره نتایج در فایل JSON
+        os.makedirs("seo_output", exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = f"seo_output/seo_results_{timestamp}.json"
+
+        try:
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump(results, f, indent=2, ensure_ascii=False)
+            logger.info(f"💾 فایل خروجی JSON ذخیره شد: {output_path}")
+        except Exception as e:
+            logger.error(f"❌ خطا در ذخیره فایل JSON: {e}")
 
     except Exception as e:
         logger.exception(f"❌ خطای کلی در اجرای برنامه: {e}")

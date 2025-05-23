@@ -2,32 +2,12 @@ import re
 import logging
 from typing import Optional, Dict, List
 from sentence_transformers import SentenceTransformer, util
-from functools import lru_cache
-
-try:
-    import hazm
-    from hazm import Normalizer, word_tokenize, Lemmatizer
-    hazm_available = True
-except ImportError:
-    hazm_available = False
-
-import spacy
-try:
-    nlp_en = spacy.load("en_core_web_sm")
-except:
-    nlp_en = None
+from functools import lru_cache, cached_property
 
 
 class SEOTitleEvaluator:
     def __init__(self, model_name: str = 'all-MiniLM-L6-v2', weights: Optional[Dict[str, float]] = None):
         self.model = SentenceTransformer(model_name)
-
-        self.use_farsi = hazm_available
-        if hazm_available:
-            self.lemmatizer_fa = Lemmatizer()
-            self.normalizer_fa = Normalizer()
-        self.nlp_en = nlp_en
-
         self.weights = weights or {
             "keyword_start": 1.5,
             "keyword_contains": 2.5,
@@ -44,6 +24,27 @@ class SEOTitleEvaluator:
             "weak_grammar_penalty": -1.0,
         }
 
+    @cached_property
+    def hazm_tools(self):
+        try:
+            from hazm import Normalizer, word_tokenize, Lemmatizer
+            return {
+                "available": True,
+                "normalizer": Normalizer(),
+                "tokenize": word_tokenize,
+                "lemmatizer": Lemmatizer()
+            }
+        except ImportError:
+            return {"available": False}
+
+    @cached_property
+    def spacy_en(self):
+        try:
+            import spacy
+            return spacy.load("en_core_web_sm")
+        except:
+            return None
+
     def update_weights_from_feedback(self, feedback: Dict[str, float]):
         for k, v in feedback.items():
             if k in self.weights:
@@ -58,15 +59,15 @@ class SEOTitleEvaluator:
 
     def _lemmatize(self, text: str) -> List[str]:
         text = text.lower()
-        if self.use_farsi:
-            text = self.normalizer_fa.normalize(text)
-            tokens = word_tokenize(text)
-            return [self.lemmatizer_fa.lemmatize(t) for t in tokens if t.isalpha()]
-        elif self.nlp_en:
-            doc = self.nlp_en(text)
+        if self.hazm_tools["available"]:
+            text = self.hazm_tools["normalizer"].normalize(text)
+            tokens = self.hazm_tools["tokenize"](text)
+            return [self.hazm_tools["lemmatizer"].lemmatize(t) for t in tokens if t.isalpha()]
+        elif self.spacy_en:
+            doc = self.spacy_en(text)
             return [token.lemma_ for token in doc if token.is_alpha]
         else:
-            return re.findall(r'\b\w+\b', text.lower())
+            return re.findall(r'\b\w+\b', text)
 
     def _count_keyword_occurrences(self, text: str, keyword: str) -> int:
         words = self._lemmatize(text)
@@ -80,29 +81,22 @@ class SEOTitleEvaluator:
         return 0.0
 
     def _is_clickbait(self, title: str) -> float:
-        patterns = [
-            r"همه چیز درباره",
-            r"چیست\??",
-            r"راهنمای کامل",
-            r"بهترین .* چیست",
-            r"(you|won't|never|must|shocking|secret|revealed)",
-        ]
-        if any(re.search(p, title.lower()) for p in patterns):
-            return self.weights["clickbait_penalty"]
-        return 0.0
+        patterns = [r"\b(you|won't|never|must|shocking|secret|revealed)\b",
+                    r"همه چیز درباره", r"چیست\??", r"راهنمای کامل", r"بهترین .* چیست"]
+        return self.weights["clickbait_penalty"] if any(re.search(p, title.lower()) for p in patterns) else 0.0
 
     def _is_gibberish(self, title: str) -> float:
         words = title.split()
-        long_words = [w for w in words if len(w) > 20 or not re.search(r'[a-zA-Z\u0600-\u06FF0-9]', w)]
-        if len(long_words) / max(len(words), 1) > 0.3:
+        bad_words = [w for w in words if len(w) > 20 or not re.search(r'[a-zA-Z\u0600-\u06FF0-9]', w)]
+        if len(bad_words) / max(len(words), 1) > 0.3:
             return self.weights["gibberish_penalty"]
         return 0.0
 
     def _grammar_weakness_penalty(self, title: str) -> float:
-        if self.nlp_en:
-            doc = self.nlp_en(title)
-            root_tokens = [t for t in doc if t.dep_ in ("ROOT", "nsubj")]
-            if len(root_tokens) < 1:
+        if self.spacy_en:
+            doc = self.spacy_en(title)
+            roots = [t for t in doc if t.dep_ in ("ROOT", "nsubj")]
+            if not roots:
                 return self.weights["weak_grammar_penalty"]
         return 0.0
 
@@ -115,57 +109,56 @@ class SEOTitleEvaluator:
         title_lower = title.lower()
         focus_lower = focus_keyword.lower()
 
+        # Keyword placement
         if title_lower.startswith(focus_lower):
             score += self.weights["keyword_start"]
         elif focus_lower in title_lower:
-            pos = title_lower.find(focus_lower)
-            score += self.weights["keyword_contains"] * (1 - pos / len(title_lower))
+            score += self.weights["keyword_contains"] * (1 - title_lower.find(focus_lower) / len(title_lower))
 
+        # Length
         score += self._length_score(len(title.strip()))
 
+        # Formatting cues
         if title and title[0].isupper():
             score += self.weights["capitalized"]
-
-        if any(ch in title for ch in [":", "-", "?"]):
+        if any(p in title for p in [":", "-", "?"]):
             score += self.weights["punctuation"]
 
-        voice_search_phrases = ["how to", "what is", "why is", "where can", "who is", "چگونه", "چیست", "چرا", "کجا"]
-        if any(p in title_lower for p in voice_search_phrases):
+        # Voice search friendly
+        voice_keywords = ["how to", "what is", "why is", "where can", "who is", "چگونه", "چیست", "چرا", "کجا"]
+        if any(p in title_lower for p in voice_keywords):
             score += self.weights["voice_search"]
 
+        # Keyword repetition
         lemmatized_words = self._lemmatize(title)
-        count_focus = self._count_keyword_occurrences(title, focus_keyword)
-        score += self._repeated_keyword_penalty(count_focus, len(lemmatized_words))
+        kcount = self._count_keyword_occurrences(title, focus_keyword)
+        score += self._repeated_keyword_penalty(kcount, len(lemmatized_words))
 
-        unique_words = len(set(lemmatized_words))
-        ratio = unique_words / max(len(lemmatized_words), 1)
-        if ratio > 0.5:
-            score += self.weights["unique_word_ratio_good"] * ratio
-        else:
-            score += self.weights["unique_word_ratio_bad"] * (1 - ratio)
+        # Unique word ratio
+        unique_ratio = len(set(lemmatized_words)) / max(len(lemmatized_words), 1)
+        score += self.weights["unique_word_ratio_good"] * unique_ratio if unique_ratio > 0.5 else self.weights["unique_word_ratio_bad"] * (1 - unique_ratio)
 
+        # Semantic similarity
         try:
-            title_emb = self._encode(title)
-            keyword_emb = self._encode(focus_keyword)
-            sim = util.cos_sim(title_emb, keyword_emb).item()
-            score += sim * self.weights["semantic"]
+            score += util.cos_sim(self._encode(title), self._encode(focus_keyword)).item() * self.weights["semantic"]
         except Exception as e:
-            logging.warning(f"Semantic embedding failed: {e}")
+            logging.warning(f"Semantic similarity failed: {e}")
             score += 0.5 * self.weights["semantic"]
 
+        # Penalties
         score += self._is_clickbait(title)
         score += self._is_gibberish(title)
         score += self._grammar_weakness_penalty(title)
 
         return round(min(max(score, 0), 10), 3)
 
-    def quick_score(self, title: str, focus_keyword: str) -> float:
-        title_lower = title.lower()
-        focus_lower = focus_keyword.lower()
+    def quick_score(self, title: str, keyword: str) -> float:
         base = 0.0
-        if title_lower.startswith(focus_lower):
+        title_lower = title.lower()
+        keyword_lower = keyword.lower()
+        if title_lower.startswith(keyword_lower):
             base += 1.0
-        if focus_lower in title_lower:
+        if keyword_lower in title_lower:
             base += 1.0
         if 15 <= len(title) <= 60:
             base += 1.5
